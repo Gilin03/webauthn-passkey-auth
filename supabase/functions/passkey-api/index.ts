@@ -22,7 +22,7 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': ORIGIN,
   'Access-Control-Allow-Credentials': 'false',
   'Access-Control-Allow-Headers':
-    'authorization, x-client-info, apikey, content-type, x-enrollment-token, x-registration-token, x-auth-challenge-id',
+    'authorization, x-client-info, apikey, content-type, x-enrollment-token, x-registration-token, x-auth-challenge-token',
   'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
 };
 
@@ -81,10 +81,21 @@ async function requestJson(req: Request) {
   }
 }
 
-type PendingEnrollment = {
+type SignedEnrollment = {
+  kind: 'enrollment';
   userId: string;
   webAuthnUserId: string;
   username: string;
+  issuedAt: number;
+  expiresAt: number;
+};
+
+type SignedRegistration = {
+  kind: 'registration';
+  challengeId: string;
+  userId: string;
+  issuedAt: number;
+  expiresAt: number;
 };
 
 async function hmacSign(value: string) {
@@ -101,26 +112,72 @@ async function hmacSign(value: string) {
   );
 }
 
-async function signPending(value: PendingEnrollment) {
+function constantTimeEqual(left: Uint8Array, right: Uint8Array) {
+  const length = Math.max(left.length, right.length);
+  let difference = left.length ^ right.length;
+
+  for (let index = 0; index < length; index += 1) {
+    difference |= (left[index] || 0) ^ (right[index] || 0);
+  }
+
+  return difference === 0;
+}
+
+async function signToken(value: SignedEnrollment | SignedRegistration) {
   const encoded = base64url(JSON.stringify(value));
   const signature = base64url(await hmacSign(encoded));
   return `${encoded}.${signature}`;
 }
 
-async function readPending(req: Request) {
-  const token = req.headers.get('x-enrollment-token');
+async function readSignedToken<T extends SignedEnrollment | SignedRegistration>(
+  req: Request,
+  headerName: string,
+  kind: T['kind'],
+) {
+  const token = req.headers.get(headerName);
   if (!token) return null;
   const index = token.lastIndexOf('.');
   if (index <= 0) return null;
   const encoded = token.slice(0, index);
   const signature = token.slice(index + 1);
-  const expected = base64url(await hmacSign(encoded));
-  if (signature !== expected) return null;
+
   try {
-    return JSON.parse(new TextDecoder().decode(base64urlDecode(encoded))) as PendingEnrollment;
+    const expected = await hmacSign(encoded);
+    const received = base64urlDecode(signature);
+    if (!constantTimeEqual(received, expected)) return null;
+
+    const payload = JSON.parse(
+      new TextDecoder().decode(base64urlDecode(encoded)),
+    ) as T;
+
+    if (
+      payload.kind !== kind
+      || !payload.issuedAt
+      || !payload.expiresAt
+      || payload.expiresAt <= Date.now()
+      || payload.issuedAt > Date.now() + 60_000
+    ) return null;
+
+    return payload;
   } catch {
     return null;
   }
+}
+
+async function readEnrollmentToken(req: Request) {
+  return readSignedToken<SignedEnrollment>(
+    req,
+    'x-enrollment-token',
+    'enrollment',
+  );
+}
+
+async function readRegistrationToken(req: Request) {
+  return readSignedToken<SignedRegistration>(
+    req,
+    'x-registration-token',
+    'registration',
+  );
 }
 
 async function currentUser(req: Request) {
@@ -204,14 +261,14 @@ async function consumeChallenge(sessionId: string, purpose: 'registration' | 'au
 
 async function registerOptions(req: Request) {
   const sessionUser = await currentUser(req);
-  const pending = sessionUser ? null : await readPending(req);
+  const pending = sessionUser ? null : await readEnrollmentToken(req);
   const userId = sessionUser?.user.id || pending?.userId;
 
   if (!userId) return json({ error: 'enrollment_or_authentication_required' }, 401);
 
   const username = sessionUser?.user.username || pending!.username;
   const webAuthnUserId = pending?.webAuthnUserId || sessionUser!.user.id;
-  const registrationId = randomToken(24);
+  const challengeId = randomToken(24);
 
   const { data: existing } = await supabase
     .from('passkeys')
@@ -234,17 +291,29 @@ async function registerOptions(req: Request) {
     },
   });
 
-  await saveChallenge(registrationId, 'registration', userId, options.challenge);
+  await saveChallenge(challengeId, 'registration', userId, options.challenge);
 
-  return json({ ...options, registrationToken: registrationId });
+  const issuedAt = Date.now();
+  const registrationToken = await signToken({
+    kind: 'registration',
+    challengeId,
+    userId,
+    issuedAt,
+    expiresAt: issuedAt + CHALLENGE_TTL * 1000,
+  });
+
+  return json({ ...options, registrationToken });
 }
 
 async function registerVerify(req: Request) {
-  const registrationId = req.headers.get('x-registration-token');
-  if (!registrationId) return json({ error: 'registration_context_missing' }, 401);
+  const registration = await readRegistrationToken(req);
+  if (!registration) return json({ error: 'registration_context_missing' }, 401);
 
-  const challenge = await consumeChallenge(registrationId, 'registration');
-  if (!challenge?.user_id) return json({ error: 'registration_challenge_invalid_or_used' }, 401);
+  const challenge = await consumeChallenge(registration.challengeId, 'registration');
+  if (
+    !challenge?.user_id
+    || challenge.user_id !== registration.userId
+  ) return json({ error: 'registration_challenge_invalid_or_used' }, 401);
 
   const b = await requestJson(req);
 
@@ -273,8 +342,10 @@ async function registerVerify(req: Request) {
     .eq('id', challenge.user_id)
     .maybeSingle();
 
+  let createdUser = false;
+
   if (!existingUser) {
-    const pending = await readPending(req);
+    const pending = await readEnrollmentToken(req);
     if (!pending || pending.userId !== challenge.user_id) {
       return json({ error: 'enrollment_expired' }, 401);
     }
@@ -284,14 +355,17 @@ async function registerVerify(req: Request) {
       .insert({ id: pending.userId, username: pending.username });
 
     if (userError) return json({ error: 'user_creation_failed' }, 500);
+    createdUser = true;
 
+    const accountMarker = pending.userId.slice(0, 8).toUpperCase();
     const { error: itemError } = await supabase.from('private_items').insert([
-      { user_id: pending.userId, title: '프로젝트 메모', content: '가상의 프로젝트 기록입니다. 공개 페이지와 분리한 개인 작업 메모입니다.' },
-      { user_id: pending.userId, title: '지원 목록', content: '가상의 지원처 A · 가상의 지원처 B · 가상의 지원처 C' },
-      { user_id: pending.userId, title: '개인 회고', content: '패스키와 공개키, 일회용 challenge를 확인한 가상 회고입니다.' },
+      { user_id: pending.userId, title: '프로젝트 메모', content: `가상 계정 ${accountMarker} 전용 프로젝트 기록입니다. 공개 페이지와 분리한 개인 작업 메모입니다.` },
+      { user_id: pending.userId, title: '지원 목록', content: `가상 계정 ${accountMarker}용 지원처 A · 지원처 B · 지원처 C` },
+      { user_id: pending.userId, title: '개인 회고', content: `가상 계정 ${accountMarker}에서 패스키와 공개키, 일회용 challenge를 확인한 가상 회고입니다.` },
     ]);
 
     if (itemError) {
+      await supabase.from('private_items').delete().eq('user_id', pending.userId);
       await supabase.from('portfolio_users').delete().eq('id', pending.userId);
       return json({ error: 'private_item_storage_failed' }, 500);
     }
@@ -308,7 +382,13 @@ async function registerVerify(req: Request) {
     backed_up: credentialBackedUp,
   });
 
-  if (passkeyError) return json({ error: 'passkey_storage_failed' }, 500);
+  if (passkeyError) {
+    if (createdUser) {
+      await supabase.from('private_items').delete().eq('user_id', challenge.user_id);
+      await supabase.from('portfolio_users').delete().eq('id', challenge.user_id);
+    }
+    return json({ error: 'passkey_storage_failed' }, 500);
+  }
 
   const { data: hasSession } = await supabase
     .from('portfolio_sessions')
@@ -324,25 +404,27 @@ async function registerVerify(req: Request) {
   return json({
     verified: true,
     sessionToken,
+    clearEnrollmentToken: true,
+    clearRegistrationToken: true,
     stored: { publicKeyOnly: true, credentialId: credential.id, friendlyName },
   });
 }
 
 async function authOptions() {
-  const challengeId = randomToken(24);
+  const authChallengeToken = randomToken(24);
   const options = await generateAuthenticationOptions({
     rpID: RP_ID,
     userVerification: 'preferred',
   });
-  await saveChallenge(challengeId, 'authentication', null, options.challenge);
-  return json({ ...options, challengeId });
+  await saveChallenge(authChallengeToken, 'authentication', null, options.challenge);
+  return json({ ...options, authChallengeToken });
 }
 
 async function authVerify(req: Request) {
-  const challengeId = req.headers.get('x-auth-challenge-id');
-  if (!challengeId) return json({ error: 'authentication_challenge_missing' }, 401);
+  const authChallengeToken = req.headers.get('x-auth-challenge-token');
+  if (!authChallengeToken) return json({ error: 'authentication_challenge_missing' }, 401);
 
-  const challenge = await consumeChallenge(challengeId, 'authentication');
+  const challenge = await consumeChallenge(authChallengeToken, 'authentication');
   if (!challenge) return json({ error: 'authentication_challenge_invalid_or_used' }, 401);
 
   const b = await requestJson(req);
@@ -387,7 +469,12 @@ async function authVerify(req: Request) {
     .eq('user_id', passkey.user_id);
 
   const token = await createSession(passkey.user_id);
-  return json({ verified: true, sessionToken: token, user: { id: passkey.user_id } });
+  return json({
+    verified: true,
+    sessionToken: token,
+    clearAuthChallengeToken: true,
+    user: { id: passkey.user_id },
+  });
 }
 
 async function privateItems(req: Request) {
@@ -497,7 +584,7 @@ async function logout(req: Request) {
 async function cancelEnrollment(req: Request) {
   const enrollmentToken = req.headers.get('x-enrollment-token');
   if (enrollmentToken) {
-    const pending = await readPending(req);
+    const pending = await readEnrollmentToken(req);
     if (pending) {
       await supabase
         .from('webauthn_challenges')
@@ -509,11 +596,14 @@ async function cancelEnrollment(req: Request) {
 
   const registrationToken = req.headers.get('x-registration-token');
   if (registrationToken) {
-    await supabase
-      .from('webauthn_challenges')
-      .delete()
-      .eq('session_id', registrationToken)
-      .is('used_at', null);
+    const registration = await readRegistrationToken(req);
+    if (registration) {
+      await supabase
+        .from('webauthn_challenges')
+        .delete()
+        .eq('session_id', registration.challengeId)
+        .is('used_at', null);
+    }
   }
 
   return json({ ok: true, storedUser: false, storedPasskey: false });
@@ -541,10 +631,13 @@ Deno.serve(async (req) => {
       const username = String(b.username || '').trim().slice(0, 80);
       if (!username) return json({ error: 'invalid_username' }, 400);
 
-      const token = await signPending({
+      const token = await signToken({
+        kind: 'enrollment',
         userId: crypto.randomUUID(),
         webAuthnUserId: crypto.randomUUID(),
         username,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + CHALLENGE_TTL * 1000,
       });
       return json({ ok: true, username, enrollmentToken: token });
     }

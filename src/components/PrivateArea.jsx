@@ -14,13 +14,59 @@ import {
   Trash2,
   UserPlus,
 } from 'lucide-react';
-import { apiFetch, clearSessionToken, setSessionToken } from '@/lib/api';
+import {
+  apiFetch,
+  clearAuthChallenge,
+  clearEnrollmentState,
+  clearSessionToken,
+  setSessionToken,
+} from '@/lib/api';
 
 const fakePrivateExamples = [
   '프로젝트 메모',
   '지원 목록',
   '개인 회고',
 ];
+
+function getErrorMessage(error, flow) {
+  const code = error?.code || error?.payload?.error || error?.message;
+
+  if (error?.name === 'NotAllowedError') {
+    return flow === 'registration'
+      ? '패스키 등록이 취소되었습니다. 사용자와 패스키는 저장되지 않습니다.'
+      : '패스키 인증이 취소되었습니다.';
+  }
+
+  if (code === 'client_configuration_missing') {
+    return '인증 설정이 준비되지 않았습니다. 배포 환경의 공개 환경변수를 확인하세요.';
+  }
+
+  if (code === 'network_error') {
+    return '네트워크 연결을 확인한 뒤 다시 시도하세요.';
+  }
+
+  if (error?.status >= 500 || code === 'server_error') {
+    return '인증 서버에 문제가 있습니다. 잠시 후 다시 시도하세요.';
+  }
+
+  const messages = {
+    authentication_challenge_missing: '인증 질문이 없어 로그인할 수 없습니다. 다시 시도하세요.',
+    authentication_challenge_invalid_or_used: '만료되었거나 이미 사용한 인증 질문입니다. 다시 시도하세요.',
+    authentication_verification_failed: '패스키 서명을 확인하지 못했습니다. 배포 주소의 RP ID/Origin과 등록된 기기를 확인하세요.',
+    unknown_passkey: '등록되지 않았거나 삭제된 패스키입니다.',
+    enrollment_expired: '패스키 등록 준비가 만료되었습니다. 처음부터 다시 시도하세요.',
+    registration_challenge_invalid_or_used: '만료되었거나 이미 사용한 등록 질문입니다. 다시 시도하세요.',
+    registration_verification_failed: '패스키 등록을 확인하지 못했습니다. 배포 주소의 RP ID/Origin과 기기 설정을 확인하세요.',
+    registration_context_missing: '패스키 등록 준비가 없습니다. 처음부터 다시 시도하세요.',
+    passkey_not_found: '이미 삭제된 패스키입니다.',
+    authentication_required: '먼저 패스키로 인증하세요.',
+    unauthenticated: '로그인 상태를 확인할 수 없습니다. 다시 인증하세요.',
+  };
+
+  return messages[code]
+    || error?.message
+    || (flow === 'registration' ? '패스키 등록에 실패했습니다.' : '인증에 실패했습니다.');
+}
 
 export default function PrivateArea() {
   const [authenticated, setAuthenticated] = useState(false);
@@ -42,18 +88,23 @@ export default function PrivateArea() {
     setItems([]);
   }, []);
 
-  const loadPrivate = useCallback(async () => {
+  const loadPrivate = useCallback(async (announceError = false) => {
     try {
-      const me = await apiFetch('?action=me');
+      const me = await apiFetch('me');
       if (!me.authenticated) throw new Error('unauthenticated');
-      const privateData = await apiFetch('?action=private-items');
+      const privateData = await apiFetch('private-items');
 
       setAuthenticated(true);
       setUser(me.user);
       setPasskeys(me.passkeys || []);
       setItems(privateData.items || []);
-    } catch {
+      return true;
+    } catch (error) {
       resetPrivateState();
+      if (announceError || error?.status >= 500 || error?.code === 'network_error') {
+        setStatus(getErrorMessage(error, 'authentication'));
+      }
+      return false;
     }
   }, [resetPrivateState]);
 
@@ -71,32 +122,26 @@ export default function PrivateArea() {
     setStatus('서버에서 새 인증 질문을 받고 있습니다.');
 
     try {
-      const options = await apiFetch('?action=auth-options', { method: 'POST' });
-      const { challengeId, ...authOptions } = options;
+      const options = await apiFetch('auth-options', { method: 'POST' });
+      const { authChallengeToken, ...authOptions } = options;
+      if (!authChallengeToken) {
+        throw new Error('authentication_challenge_missing');
+      }
       setStatus('기기의 패스키 확인 창에서 인증을 진행하세요.');
       const credential = await startAuthentication({ optionsJSON: authOptions });
 
-      const result = await apiFetch('?action=auth-verify', {
+      const result = await apiFetch('auth-verify', {
         method: 'POST',
-        headers: {
-          'X-Auth-Challenge-Id': challengeId,
-        },
         body: JSON.stringify(credential),
       });
 
       setSessionToken(result.sessionToken);
       setStatus('인증에 성공했습니다. 비공개 자료를 불러왔습니다.');
-      await loadPrivate();
+      await loadPrivate(true);
     } catch (error) {
-      const message = error?.status === 401
-        ? '패스키 인증이 거절되었습니다. 잘못된 서명, 만료되었거나 이미 사용한 질문, 삭제된 패스키인지 확인하세요.'
-        : error?.name === 'NotAllowedError'
-          ? '패스키 인증이 취소되었습니다.'
-          : error?.message || '인증에 실패했습니다.';
-      setStatus(message);
-      if (error?.status === 401) {
-        clearSessionToken();
-      }
+      setStatus(getErrorMessage(error, 'authentication'));
+      clearAuthChallenge();
+      if (error?.status === 401 || error?.code === 'authentication_required') clearSessionToken();
       resetPrivateState();
     } finally {
       setBusy(false);
@@ -109,7 +154,7 @@ export default function PrivateArea() {
 
     try {
       if (registration || enrollment) {
-        await apiFetch('?action=enroll-cancel', {
+        await apiFetch('enroll-cancel', {
           method: 'POST',
           headers: {
             ...(enrollment ? { 'X-Enrollment-Token': enrollment } : {}),
@@ -125,6 +170,7 @@ export default function PrivateArea() {
     setPasskeyName('');
     setEnrollmentToken('');
     setRegistrationToken('');
+    clearEnrollmentState();
   }
 
   async function startEnroll() {
@@ -146,7 +192,7 @@ export default function PrivateArea() {
       setStatus('등록용 새 질문을 만들고 있습니다.');
 
       if (!authenticated) {
-        const enrollment = await apiFetch('?action=enroll-start', {
+        const enrollment = await apiFetch('enroll-start', {
           method: 'POST',
           body: JSON.stringify({ username: enrollLabel.trim() }),
         });
@@ -154,7 +200,7 @@ export default function PrivateArea() {
         setEnrollmentToken(activeEnrollmentToken);
       }
 
-      const options = await apiFetch('?action=register-options', {
+      const options = await apiFetch('register-options', {
         method: 'POST',
         headers: activeEnrollmentToken
           ? { 'X-Enrollment-Token': activeEnrollmentToken }
@@ -162,17 +208,20 @@ export default function PrivateArea() {
       });
 
       activeRegistrationToken = options.registrationToken;
+      if (!activeRegistrationToken) {
+        throw new Error('registration_context_missing');
+      }
       setRegistrationToken(activeRegistrationToken);
 
-      const { registrationToken, ...publicOptions } = options;
+      const { registrationToken: issuedRegistrationToken, ...publicOptions } = options;
       setStatus('기기에서 패스키를 만들고 있습니다. 취소하면 저장되지 않습니다.');
       const credential = await startRegistration({ optionsJSON: publicOptions });
       const friendlyName = (passkeyName.trim() || '내 패스키').slice(0, 120);
 
-      const result = await apiFetch('?action=register-verify', {
+      const result = await apiFetch('register-verify', {
         method: 'POST',
         headers: {
-          'X-Registration-Token': registrationToken,
+          'X-Registration-Token': issuedRegistrationToken,
           ...(activeEnrollmentToken
             ? { 'X-Enrollment-Token': activeEnrollmentToken }
             : {}),
@@ -193,11 +242,7 @@ export default function PrivateArea() {
       await loadPrivate();
     } catch (error) {
       await cancelEnrollment(activeEnrollmentToken, activeRegistrationToken);
-      setStatus(
-        error?.name === 'NotAllowedError'
-          ? '패스키 등록이 취소되었습니다. 사용자와 패스키는 저장되지 않습니다.'
-          : error?.message || '패스키 등록에 실패했습니다.',
-      );
+      setStatus(getErrorMessage(error, 'registration'));
     } finally {
       setBusy(false);
     }
@@ -206,12 +251,12 @@ export default function PrivateArea() {
   async function logout() {
     setBusy(true);
     try {
-      await apiFetch('?action=logout', { method: 'POST' });
+      await apiFetch('logout', { method: 'POST' });
       clearSessionToken();
       resetPrivateState();
       setStatus('로그아웃되었습니다. 다시 인증하기 전에는 비공개 자료를 요청할 수 없습니다.');
     } catch (error) {
-      setStatus(error?.message || '로그아웃에 실패했습니다.');
+      setStatus(getErrorMessage(error, 'authentication'));
     } finally {
       setBusy(false);
     }
@@ -222,10 +267,10 @@ export default function PrivateArea() {
 
     setBusy(true);
     try {
-      const result = await apiFetch(
-        `?action=passkey-delete&credential_id=${encodeURIComponent(id)}`,
-        { method: 'DELETE' },
-      );
+      const result = await apiFetch('passkey-delete', {
+        method: 'DELETE',
+        query: { credential_id: id },
+      });
 
       if (result.remaining === 0) {
         clearSessionToken();
@@ -236,7 +281,7 @@ export default function PrivateArea() {
         await loadPrivate();
       }
     } catch (error) {
-      setStatus(error?.message || '패스키 삭제에 실패했습니다.');
+      setStatus(getErrorMessage(error, 'authentication'));
     } finally {
       setBusy(false);
     }

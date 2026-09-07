@@ -1,5 +1,8 @@
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
+const SUPABASE_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+  || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
+  || '';
 
 const FUNCTION_URL =
   `${SUPABASE_URL.replace(/\/$/, '')}/functions/v1/passkey-api`;
@@ -90,6 +93,12 @@ export async function apiFetch(
     options.headers || {},
   );
 
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    const error = new Error('client_configuration_missing');
+    error.code = 'client_configuration_missing';
+    throw error;
+  }
+
   headers.set(
     'apikey',
     SUPABASE_KEY,
@@ -145,13 +154,31 @@ export async function apiFetch(
     );
   }
 
-  const response = await fetch(
-    `${FUNCTION_URL}?action=${encodeURIComponent(cleanAction)}`,
-    {
-      ...options,
-      headers,
-    },
-  );
+  const { query, ...requestOptions } = options;
+  const searchParams = new URLSearchParams({
+    action: cleanAction,
+  });
+
+  Object.entries(query || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      searchParams.set(key, String(value));
+    }
+  });
+
+  let response;
+  try {
+    response = await fetch(
+      `${FUNCTION_URL}?${searchParams.toString()}`,
+      {
+        ...requestOptions,
+        headers,
+      },
+    );
+  } catch {
+    const error = new Error('network_error');
+    error.code = 'network_error';
+    throw error;
+  }
 
   let payload = null;
 
@@ -168,6 +195,7 @@ export async function apiFetch(
     );
 
     error.status = response.status;
+    error.code = payload?.error || 'http_error';
     error.payload = payload;
 
     throw error;
