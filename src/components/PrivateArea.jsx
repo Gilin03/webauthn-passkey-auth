@@ -18,8 +18,6 @@ import {
   apiFetch,
   clearAuthChallenge,
   clearEnrollmentState,
-  clearSessionToken,
-  setSessionToken,
 } from '@/lib/api';
 
 const fakePrivateExamples = [
@@ -130,18 +128,16 @@ export default function PrivateArea() {
       setStatus('기기의 패스키 확인 창에서 인증을 진행하세요.');
       const credential = await startAuthentication({ optionsJSON: authOptions });
 
-      const result = await apiFetch('auth-verify', {
+      await apiFetch('auth-verify', {
         method: 'POST',
         body: JSON.stringify(credential),
       });
 
-      setSessionToken(result.sessionToken);
       setStatus('인증에 성공했습니다. 비공개 자료를 불러왔습니다.');
       await loadPrivate(true);
     } catch (error) {
       setStatus(getErrorMessage(error, 'authentication'));
       clearAuthChallenge();
-      if (error?.status === 401 || error?.code === 'authentication_required') clearSessionToken();
       resetPrivateState();
     } finally {
       setBusy(false);
@@ -218,7 +214,7 @@ export default function PrivateArea() {
       const credential = await startRegistration({ optionsJSON: publicOptions });
       const friendlyName = (passkeyName.trim() || '내 패스키').slice(0, 120);
 
-      const result = await apiFetch('register-verify', {
+      await apiFetch('register-verify', {
         method: 'POST',
         headers: {
           'X-Registration-Token': issuedRegistrationToken,
@@ -228,8 +224,6 @@ export default function PrivateArea() {
         },
         body: JSON.stringify({ ...credential, friendlyName }),
       });
-
-      if (result.sessionToken) setSessionToken(result.sessionToken);
 
       setShowEnroll(false);
       setEnrollLabel('');
@@ -252,7 +246,6 @@ export default function PrivateArea() {
     setBusy(true);
     try {
       await apiFetch('logout', { method: 'POST' });
-      clearSessionToken();
       resetPrivateState();
       setStatus('로그아웃되었습니다. 다시 인증하기 전에는 비공개 자료를 요청할 수 없습니다.');
     } catch (error) {
@@ -273,7 +266,6 @@ export default function PrivateArea() {
       });
 
       if (result.remaining === 0) {
-        clearSessionToken();
         resetPrivateState();
         setStatus('마지막 패스키가 삭제되어 자동 로그아웃되었습니다. 다시 들어오려면 패스키를 새로 등록해야 합니다.');
       } else {

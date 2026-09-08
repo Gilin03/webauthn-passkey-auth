@@ -24,7 +24,7 @@
 - 브라우저는 DB를 직접 조회하지 않고 Edge Function만 호출한다. 관련 테이블은 RLS를 켜고 서비스 역할 키는 Edge Function 안에서만 사용한다.
 - 등록 시 `verifyRegistrationResponse`가 검증한 공개키만 `passkeys.public_key`에 저장한다. 개인키와 비밀번호는 요청·코드·DB에 저장하지 않는다.
 - 로그인 시 `verifyAuthenticationResponse`가 저장된 공개키로 서명을 검증한다.
-- 로그인 후에는 랜덤 bearer session token을 `sessionStorage`에 보관하고 `Authorization: Bearer ...` 헤더로 전송한다. 서버에는 원문이 아니라 SHA-256 hash만 `portfolio_sessions.token_hash`에 저장한다.
+- 로그인 후에는 서버가 HMAC 서명한 `HttpOnly; Secure; SameSite=None` 세션 쿠키를 발급한다. 브라우저 JavaScript는 쿠키 값을 읽지 않으며, 서버에는 원문이 아니라 SHA-256 hash만 `portfolio_sessions.token_hash`에 저장한다.
 
 ## ② 왜 골랐나
 
@@ -54,7 +54,7 @@ Supabase Edge Function과 PostgreSQL을 사용하면 기존 React/Vite 공개 �
 
 - 프런트: `src/components/PrivateArea.jsx`의 `logout`
 - 서버: `supabase/functions/passkey-api/index.ts`의 `logout`, `currentUser`
-- 현재 bearer token에 해당하는 세션의 `revoked_at`을 기록하고 프런트의 sessionStorage 값을 삭제한다. 마지막 패스키 삭제 시에도 해당 사용자의 활성 세션을 폐기한다.
+- 현재 세션 쿠키에 해당하는 세션의 `revoked_at`을 기록하고 서버가 쿠키를 만료시킨다. 마지막 패스키 삭제 시에도 해당 사용자의 활성 세션을 폐기하고 쿠키를 만료시킨다.
 
 ### 4. 비공개 자료 조회와 사용자 격리
 
@@ -81,16 +81,16 @@ Edge Function에는 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `WEBAUTHN_RP_ID
 
 | 확인 항목 | 성공 요청 | 거절 요청 | 현재 판정 |
 |---|---|---|---|
-| 로그인 없이 비공개 자료 | 인증 후 `GET /functions/v1/passkey-api?action=private-items` → `200`과 내 자료 | 인증 헤더 없이 같은 요청 → `401 authentication_required` | 미실행 |
+| 로그인 없이 비공개 자료 | 인증 후 `GET /functions/v1/passkey-api?action=private-items` → `200`과 내 자료 | 세션 쿠키 없이 같은 요청 → `401 authentication_required` | 미실행 |
 | 다른 계정 자료 | A 세션으로 A 자료 → `200` | A 세션으로 B `user_id` 요청 → `403 forbidden_user_resource`; B도 역방향 동일 | 미실행 |
 | challenge 재사용 | 새 challenge + 정상 서명 → `200` | 같은 `X-Auth-Challenge-Token` 재전송 → `401 authentication_challenge_invalid_or_used` | 미실행 |
 | 패스키 삭제 | 패스키 1 삭제 후 패스키 2 로그인 → 성공 | 삭제한 패스키 1 로그인 → `401` 인증 실패 | 미실행 |
-| 로그아웃 | 로그인 세션으로 `private-items` → `200` | 로그아웃 후 같은 token → `401` | 미실행 |
+| 로그아웃 | 로그인 세션으로 `private-items` → `200` | 로그아웃 후 같은 세션 쿠키 → `401` | 미실행 |
 
 제출 시 응답에 포함할 값은 다음처럼 마스킹한다.
 
 ```text
-Authorization: Bearer ***MASKED***
+Cookie: tb_portfolio_session=***MASKED***
 X-Auth-Challenge-Token: 8d41c9a2********
 credential_id: ***MASKED***
 HTTP 401
@@ -121,7 +121,7 @@ challenge 두 개 비교도 앞 8자만 남긴다. 전체 token, cookie, 개인�
 정상 서명: [실제 HTTP 상태와 화면 결과]
 잘못된 서명: [실제 HTTP 상태와 화면 결과]
 재사용 challenge: [실제 HTTP 상태와 화면 결과]
-세션/토큰: sessionStorage bearer 방식, 값은 ***MASKED***
+세션/토큰: HMAC HttpOnly 세션 쿠키 방식, 값은 ***MASKED***
 ```
 
 ### 패스키 2개와 0개 상태
@@ -147,7 +147,7 @@ challenge 두 개 비교도 앞 8자만 남긴다. 전체 token, cookie, 개인�
 ## ⑥ 아직 못 막은 것
 
 - 탭 종료로 취소 API가 호출되지 않는 경우를 위한 주기적 challenge purge 작업이 없다. 현재 challenge는 5분 만료 검사를 통과하지 못하지만 만료 행 자체를 즉시 정리하는 작업은 별도 구현하지 않았다.
-- 세션 토큰을 sessionStorage에 보관하므로 XSS가 발생하면 bearer token 탈취 위험이 있다. CSP 강화와 더 엄격한 XSS 방어가 필요하다.
+- HttpOnly 쿠키로 세션 값을 JavaScript에서 읽지 못하게 했지만, `SameSite=None` 교차 출처 쿠키를 사용하므로 CSRF 방어를 별도 적용하지 않은 상태다.
 - 계정 복구·계정 삭제·관리자 감사 로그와 모든 기기 세션을 한 번에 종료하는 화면은 구현하지 않았다.
 
 ## 짧은 확인 방법 4줄

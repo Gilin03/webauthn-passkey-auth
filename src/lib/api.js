@@ -7,24 +7,9 @@ const SUPABASE_KEY =
 const FUNCTION_URL =
   `${SUPABASE_URL.replace(/\/$/, '')}/functions/v1/passkey-api`;
 
-const SESSION_KEY = 'tb_portfolio_session_token';
 const ENROLL_KEY = 'tb_portfolio_enroll_token';
 const REGISTER_KEY = 'tb_portfolio_register_token';
 const AUTH_KEY = 'tb_portfolio_auth_challenge_token';
-
-export function getSessionToken() {
-  return sessionStorage.getItem(SESSION_KEY);
-}
-
-export function setSessionToken(token) {
-  if (token) {
-    sessionStorage.setItem(SESSION_KEY, token);
-  }
-}
-
-export function clearSessionToken() {
-  sessionStorage.removeItem(SESSION_KEY);
-}
 
 function getEnrollmentToken() {
   return sessionStorage.getItem(ENROLL_KEY);
@@ -39,10 +24,6 @@ function getAuthChallengeToken() {
 }
 
 function saveTokens(data) {
-  if (data?.sessionToken) {
-    setSessionToken(data.sessionToken);
-  }
-
   if (data?.enrollmentToken) {
     sessionStorage.setItem(
       ENROLL_KEY,
@@ -76,9 +57,6 @@ function saveTokens(data) {
     sessionStorage.removeItem(AUTH_KEY);
   }
 
-  if (data?.clearSessionToken) {
-    clearSessionToken();
-  }
 }
 
 export async function apiFetch(
@@ -103,16 +81,6 @@ export async function apiFetch(
     'apikey',
     SUPABASE_KEY,
   );
-
-  const sessionToken =
-    getSessionToken();
-
-  if (sessionToken) {
-    headers.set(
-      'Authorization',
-      `Bearer ${sessionToken}`,
-    );
-  }
 
   const enrollmentToken =
     getEnrollmentToken();
@@ -171,6 +139,7 @@ export async function apiFetch(
       `${FUNCTION_URL}?${searchParams.toString()}`,
       {
         ...requestOptions,
+        credentials: 'include',
         headers,
       },
     );

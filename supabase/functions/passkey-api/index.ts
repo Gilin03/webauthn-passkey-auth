@@ -17,28 +17,50 @@ const ORIGIN = Deno.env.get('WEBAUTHN_ORIGIN') || 'http://localhost:5173';
 
 const SESSION_TTL = 60 * 60 * 8;
 const CHALLENGE_TTL = 60 * 5;
+const SESSION_COOKIE = 'tb_portfolio_session';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': ORIGIN,
-  'Access-Control-Allow-Credentials': 'false',
+  'Access-Control-Allow-Credentials': 'true',
   'Access-Control-Allow-Headers':
-    'authorization, x-client-info, apikey, content-type, x-enrollment-token, x-registration-token, x-auth-challenge-token',
+    'x-client-info, apikey, content-type, x-enrollment-token, x-registration-token, x-auth-challenge-token',
   'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
 };
 
-function json(data: unknown, status = 200) {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       ...corsHeaders,
+      ...extraHeaders,
       'Content-Type': 'application/json',
     },
   });
 }
 
-function readBearer(req: Request) {
-  const value = req.headers.get('authorization') || '';
-  return value.startsWith('Bearer ') ? value.slice(7).trim() : null;
+function readCookie(req: Request, name: string) {
+  const cookieHeader = req.headers.get('cookie') || '';
+  const prefix = `${name}=`;
+  const entry = cookieHeader
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
+
+  if (!entry) return null;
+
+  try {
+    return decodeURIComponent(entry.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
+
+function sessionCookie(token: string) {
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Max-Age=${SESSION_TTL}; Path=/; HttpOnly; Secure; SameSite=None`;
+}
+
+function clearSessionCookie() {
+  return `${SESSION_COOKIE}=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; HttpOnly; Secure; SameSite=None`;
 }
 
 function randomToken(bytes = 32) {
@@ -123,6 +145,23 @@ function constantTimeEqual(left: Uint8Array, right: Uint8Array) {
   return difference === 0;
 }
 
+async function readSessionCookie(req: Request) {
+  const token = readCookie(req, SESSION_COOKIE);
+  if (!token) return null;
+
+  const index = token.lastIndexOf('.');
+  if (index <= 0) return null;
+
+  try {
+    const encoded = token.slice(0, index);
+    const received = base64urlDecode(token.slice(index + 1));
+    const expected = await hmacSign(encoded);
+    return constantTimeEqual(received, expected) ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 async function signToken(value: SignedEnrollment | SignedRegistration) {
   const encoded = base64url(JSON.stringify(value));
   const signature = base64url(await hmacSign(encoded));
@@ -181,7 +220,7 @@ async function readRegistrationToken(req: Request) {
 }
 
 async function currentUser(req: Request) {
-  const token = readBearer(req);
+  const token = await readSessionCookie(req);
   if (!token) return null;
 
   const hash = await sha256(token);
@@ -205,7 +244,8 @@ async function currentUser(req: Request) {
 }
 
 async function createSession(userId: string) {
-  const token = randomToken(32);
+  const encoded = randomToken(32);
+  const token = `${encoded}.${base64url(await hmacSign(encoded))}`;
   const tokenHash = await sha256(token);
   const expiresAt = new Date(Date.now() + SESSION_TTL * 1000).toISOString();
 
@@ -390,24 +430,15 @@ async function registerVerify(req: Request) {
     return json({ error: 'passkey_storage_failed' }, 500);
   }
 
-  const { data: hasSession } = await supabase
-    .from('portfolio_sessions')
-    .select('id')
-    .eq('user_id', challenge.user_id)
-    .is('revoked_at', null)
-    .gt('expires_at', new Date().toISOString())
-    .limit(1)
-    .maybeSingle();
-
-  const sessionToken = hasSession ? undefined : await createSession(challenge.user_id);
+  const existingSession = await currentUser(req);
+  const sessionToken = existingSession ? null : await createSession(challenge.user_id);
 
   return json({
     verified: true,
-    sessionToken,
     clearEnrollmentToken: true,
     clearRegistrationToken: true,
     stored: { publicKeyOnly: true, credentialId: credential.id, friendlyName },
-  });
+  }, 200, sessionToken ? { 'Set-Cookie': sessionCookie(sessionToken) } : {});
 }
 
 async function authOptions() {
@@ -471,10 +502,9 @@ async function authVerify(req: Request) {
   const token = await createSession(passkey.user_id);
   return json({
     verified: true,
-    sessionToken: token,
     clearAuthChallengeToken: true,
     user: { id: passkey.user_id },
-  });
+  }, 200, { 'Set-Cookie': sessionCookie(token) });
 }
 
 async function privateItems(req: Request) {
@@ -567,7 +597,11 @@ async function deletePasskey(req: Request, credentialId: string) {
       .is('revoked_at', null);
   }
 
-  return json({ ok: true, remaining: count || 0, loggedOut: (count || 0) === 0 });
+  return json(
+    { ok: true, remaining: count || 0, loggedOut: (count || 0) === 0 },
+    200,
+    (count || 0) === 0 ? { 'Set-Cookie': clearSessionCookie() } : {},
+  );
 }
 
 async function logout(req: Request) {
@@ -578,7 +612,7 @@ async function logout(req: Request) {
       .update({ revoked_at: new Date().toISOString() })
       .eq('id', session.sessionId);
   }
-  return json({ ok: true });
+  return json({ ok: true }, 200, { 'Set-Cookie': clearSessionCookie() });
 }
 
 async function cancelEnrollment(req: Request) {
