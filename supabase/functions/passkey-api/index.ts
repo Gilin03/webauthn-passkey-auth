@@ -331,7 +331,12 @@ async function registerOptions(req: Request) {
     },
   });
 
-  await saveChallenge(challengeId, 'registration', userId, options.challenge);
+  await saveChallenge(
+    challengeId,
+    'registration',
+    sessionUser ? userId : null,
+    options.challenge,
+  );
 
   const issuedAt = Date.now();
   const registrationToken = await signToken({
@@ -348,11 +353,12 @@ async function registerOptions(req: Request) {
 async function registerVerify(req: Request) {
   const registration = await readRegistrationToken(req);
   if (!registration) return json({ error: 'registration_context_missing' }, 401);
+  const registrationUserId = registration.userId;
 
   const challenge = await consumeChallenge(registration.challengeId, 'registration');
   if (
-    !challenge?.user_id
-    || challenge.user_id !== registration.userId
+    !challenge
+    || (challenge.user_id && challenge.user_id !== registrationUserId)
   ) return json({ error: 'registration_challenge_invalid_or_used' }, 401);
 
   const b = await requestJson(req);
@@ -379,14 +385,14 @@ async function registerVerify(req: Request) {
   const { data: existingUser } = await supabase
     .from('portfolio_users')
     .select('id')
-    .eq('id', challenge.user_id)
+    .eq('id', registrationUserId)
     .maybeSingle();
 
   let createdUser = false;
 
   if (!existingUser) {
     const pending = await readEnrollmentToken(req);
-    if (!pending || pending.userId !== challenge.user_id) {
+    if (!pending || pending.userId !== registrationUserId) {
       return json({ error: 'enrollment_expired' }, 401);
     }
 
@@ -412,7 +418,7 @@ async function registerVerify(req: Request) {
   }
 
   const { error: passkeyError } = await supabase.from('passkeys').insert({
-    user_id: challenge.user_id,
+    user_id: registrationUserId,
     credential_id: credential.id,
     public_key: base64url(credential.publicKey),
     sign_count: credential.counter,
@@ -424,14 +430,14 @@ async function registerVerify(req: Request) {
 
   if (passkeyError) {
     if (createdUser) {
-      await supabase.from('private_items').delete().eq('user_id', challenge.user_id);
-      await supabase.from('portfolio_users').delete().eq('id', challenge.user_id);
+      await supabase.from('private_items').delete().eq('user_id', registrationUserId);
+      await supabase.from('portfolio_users').delete().eq('id', registrationUserId);
     }
     return json({ error: 'passkey_storage_failed' }, 500);
   }
 
   const existingSession = await currentUser(req);
-  const sessionToken = existingSession ? null : await createSession(challenge.user_id);
+  const sessionToken = existingSession ? null : await createSession(registrationUserId);
 
   return json({
     verified: true,
