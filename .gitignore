@@ -25,3 +25,8 @@ dist-ssr
 # Local passkey/user test data
 server/data.json
 .env
+
+# Assignment notes and agent instructions
+AGENTS.md
+과제8남은작업.md
+과제8_남은작업.md
