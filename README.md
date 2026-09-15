@@ -1,13 +1,40 @@
 # PassKey 포트폴리오
 
-React와 Vite로 만든 개인 포트폴리오에 패스키(WebAuthn) 기반 비공개 영역을 결합한 프로젝트입니다. 공개 영역에서는 학습 과정과 경험을 소개하고, PRIVATE / 04에서는 인증한 사용자만 서버에서 제공하는 개인 작업 기록을 확인할 수 있습니다.
+> React와 Vite로 만든 개인 포트폴리오에 패스키(WebAuthn) 기반 비공개 영역을 결합한 프로젝트입니다.
 
-## Demo
+공개 영역에서는 학습 과정과 경험을 소개하고, PRIVATE / 04에서는 인증한 사용자만 서버에서 제공하는 개인 작업 기록을 확인할 수 있습니다.
 
-| 화면 | 설명 |
-| --- | --- |
-| ![포트폴리오 시작 화면](docs/assets/readme/01-overview.png) | ABOUT와 WHAT I DID가 보이는 시작 화면 |
-| ![포트폴리오 전체 화면](docs/assets/readme/02-private-area.png) | WHAT I LIKE와 PRIVATE / 04 인증 진입 화면을 포함한 전체 화면 |
+<p align="center">
+  <img src="docs/assets/readme/01-overview.png" alt="PassKey 포트폴리오 실행 화면" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Gilin03/passkey">GitHub Repository</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=20232A" alt="React 18">
+  <img src="https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white" alt="Vite 5">
+  <img src="https://img.shields.io/badge/Tailwind_CSS-3-06B6D4?logo=tailwindcss&logoColor=white" alt="Tailwind CSS 3">
+  <img src="https://img.shields.io/badge/WebAuthn-Passkey-111827" alt="WebAuthn Passkey">
+  <img src="https://img.shields.io/badge/Supabase-Edge_Function-3FCF8E?logo=supabase&logoColor=white" alt="Supabase Edge Function">
+</p>
+
+## 목차
+
+- [프로젝트 소개](#프로젝트-소개)
+- [빠른 시작](#빠른-시작)
+- [플레이 흐름](#플레이-흐름)
+- [주요 기능](#주요-기능)
+- [기술 스택](#기술-스택)
+- [시스템 구조](#시스템-구조)
+- [프로젝트 구조](#프로젝트-구조)
+- [환경 변수](#환경-변수)
+- [API 명세](#api-명세)
+- [데이터베이스 구조](#데이터베이스-구조)
+- [보안 및 권한](#보안-및-권한)
+- [테스트 및 검증](#테스트-및-검증)
+- [개발 중 해결한 문제](#개발-중-해결한-문제)
 
 ## 프로젝트 소개
 
@@ -16,6 +43,64 @@ React와 Vite로 만든 개인 포트폴리오에 패스키(WebAuthn) 기반 비
 페이지는 ABOUT, WHAT I DID, WHAT I LIKE, PRIVATE / 04 영역으로 구성됩니다. 공개 콘텐츠와 개인 작업 기록을 한 페이지에 함께 두되, 개인 기록의 본문은 클라이언트 번들에 넣지 않고 인증 이후 Edge Function이 전달하도록 구성했습니다.
 
 패스키 등록·인증에는 비밀번호 대신 WebAuthn을 사용합니다. 서버는 기기가 보관하는 개인키를 저장하지 않고, 등록된 공개키로 인증 응답을 검증합니다.
+
+## 빠른 시작
+
+### 사전 요구 사항
+
+- Node.js와 npm
+- WebAuthn을 지원하는 최신 브라우저
+- 패스키를 사용할 수 있는 기기
+- 비공개 기능 사용 시 Supabase Edge Function과 데이터베이스 설정
+
+WebAuthn은 보안 컨텍스트가 필요하므로 로컬 개발에서는 localhost 또는 127.0.0.1을 사용합니다.
+
+### 설치 및 실행
+
+PowerShell 기준입니다.
+
+~~~powershell
+npm install
+Copy-Item .env.example .env.local
+npm run dev
+~~~
+
+.env.local에 프런트엔드 환경변수를 설정한 다음, 터미널에 표시되는 Vite 로컬 주소를 브라우저에서 엽니다.
+
+### 운영용 명령
+
+~~~powershell
+npm run lint
+npm run build
+npm run preview
+~~~
+
+## 플레이 흐름
+
+### 첫 패스키 등록
+
+1. PRIVATE / 04에서 첫 패스키 등록을 선택합니다.
+2. 테스트 계정 이름과 패스키 이름을 입력합니다.
+3. enroll-start가 enrollment token을 발급합니다.
+4. register-options가 WebAuthn 등록 옵션과 registration token을 발급합니다.
+5. 브라우저가 기기의 패스키 생성 UI를 엽니다.
+6. register-verify가 attestation을 검증합니다.
+7. 신규 계정이면 사용자·가상 자료·공개키·세션을 저장하고, 로그인 상태라면 공개키를 현재 계정에 추가합니다.
+
+등록 취소나 브라우저 인증 취소가 발생하면 프런트 상태를 초기화하고 준비된 등록 context를 정리합니다.
+
+### 패스키 로그인
+
+1. 패스키로 들어가기를 선택합니다.
+2. auth-options가 새로운 authentication challenge와 authChallengeToken을 발급합니다.
+3. 브라우저가 기기의 패스키 서명을 요청합니다.
+4. auth-verify가 challenge를 소비하고 저장된 공개키로 서명을 검증합니다.
+5. 검증에 성공하면 서버가 HMAC 서명 세션 쿠키를 발급합니다.
+6. 클라이언트가 me와 private-items를 호출해 비공개 화면을 표시합니다.
+
+### 패스키 삭제
+
+로그인 후 패스키를 삭제하면 credential ID와 현재 세션 사용자를 함께 확인한 뒤 삭제합니다. 마지막 패스키를 삭제하면 활성 세션도 폐기하고 쿠키를 만료시킵니다.
 
 ## 주요 기능
 
@@ -46,98 +131,43 @@ React와 Vite로 만든 개인 포트폴리오에 패스키(WebAuthn) 기반 비
 
 ## 시스템 구조
 
-```mermaid
+~~~mermaid
 flowchart LR
     Device["기기 패스키"] --> Browser["React / Vite 브라우저"]
     Browser -->|"fetch + credentials include"| Edge["Supabase Edge Function passkey-api"]
     Edge -->|"WebAuthn 검증"| WebAuthn["SimpleWebAuthn Server"]
     Edge -->|"Supabase client"| DB[("Supabase PostgreSQL")]
-```
+~~~
 
 클라이언트의 src/lib/api.js는 VITE_SUPABASE_URL을 기준으로 /functions/v1/passkey-api?action=... 주소를 구성해 Edge Function을 호출합니다. 브라우저는 Supabase 테이블을 직접 조회하지 않습니다.
 
-## 주요 동작 흐름
-
-### 첫 패스키 등록
-
-1. PRIVATE / 04에서 첫 패스키 등록을 선택합니다.
-2. 테스트 계정 이름과 패스키 이름을 입력합니다.
-3. enroll-start가 enrollment token을 발급합니다.
-4. register-options가 WebAuthn 등록 옵션과 registration token을 발급합니다.
-5. 브라우저가 기기의 패스키 생성 UI를 엽니다.
-6. register-verify가 attestation을 검증합니다.
-7. 신규 계정이면 사용자·가상 자료·공개키·세션을 저장하고, 로그인 상태라면 공개키를 현재 계정에 추가합니다.
-
-등록 취소나 브라우저 인증 취소가 발생하면 프런트 상태를 초기화하고 준비된 등록 context를 정리합니다.
-
-### 패스키 로그인
-
-1. 패스키로 들어가기를 선택합니다.
-2. auth-options가 새로운 authentication challenge와 authChallengeToken을 발급합니다.
-3. 브라우저가 기기의 패스키 서명을 요청합니다.
-4. auth-verify가 challenge를 소비하고 저장된 공개키로 서명을 검증합니다.
-5. 검증에 성공하면 서버가 HMAC 서명 세션 쿠키를 발급합니다.
-6. 클라이언트가 me와 private-items를 호출해 비공개 화면을 표시합니다.
-
-### 패스키 삭제
-
-로그인 후 패스키를 삭제하면 credential ID와 현재 세션 사용자를 함께 확인한 뒤 삭제합니다. 마지막 패스키를 삭제하면 활성 세션도 폐기하고 쿠키를 만료시킵니다.
-
 ## 프로젝트 구조
 
-    .
-    ├─ src/
-    │  ├─ components/
-    │  │  ├─ Header.jsx          # 상단 네비게이션
-    │  │  ├─ Hero.jsx            # ABOUT 및 합격 근거
-    │  │  ├─ WhatIDid.jsx        # 경험 카드와 상세 내용
-    │  │  ├─ WhatILike.jsx       # 관심사 카드
-    │  │  ├─ PrivateArea.jsx     # 패스키 등록·로그인·비공개 영역
-    │  │  └─ Footer.jsx
-    │  ├─ data/portfolio.js      # 공개 포트폴리오 데이터
-    │  ├─ lib/api.js             # Edge Function 호출과 token 관리
-    │  ├─ App.jsx
-    │  └─ index.css
-    ├─ supabase/functions/passkey-api/
-    │  ├─ index.ts               # 인증·세션·비공개 자료 API
-    │  └─ deno.json
-    ├─ docs/assets/readme/       # 실제 화면 캡처
-    ├─ docs-assignment8.md
-    ├─ .env.example
-    ├─ package.json
-    ├─ package-lock.json
-    ├─ tailwind.config.js
-    └─ vite.config.js
-
-## 시작하기
-
-### 사전 요구 사항
-
-- Node.js와 npm
-- WebAuthn을 지원하는 최신 브라우저
-- 패스키를 사용할 수 있는 기기
-- 비공개 기능 사용 시 Supabase Edge Function과 데이터베이스 설정
-
-WebAuthn은 보안 컨텍스트가 필요하므로 로컬 개발에서는 localhost 또는 127.0.0.1을 사용합니다.
-
-### 설치 및 실행
-
-PowerShell 기준입니다.
-
-    npm install
-    Copy-Item .env.example .env.local
-
-.env.local에 프런트엔드 환경변수를 설정한 다음 개발 서버를 실행합니다.
-
-    npm run dev
-
-터미널에 표시되는 Vite 로컬 주소를 브라우저에서 엽니다.
-
-### 운영용 명령
-
-    npm run lint
-    npm run build
-    npm run preview
+~~~text
+.
+├─ src/
+│  ├─ components/
+│  │  ├─ Header.jsx          # 상단 네비게이션
+│  │  ├─ Hero.jsx            # ABOUT 및 합격 근거
+│  │  ├─ WhatIDid.jsx        # 경험 카드와 상세 내용
+│  │  ├─ WhatILike.jsx       # 관심사 카드
+│  │  ├─ PrivateArea.jsx     # 패스키 등록·로그인·비공개 영역
+│  │  └─ Footer.jsx
+│  ├─ data/portfolio.js      # 공개 포트폴리오 데이터
+│  ├─ lib/api.js             # Edge Function 호출과 token 관리
+│  ├─ App.jsx
+│  └─ index.css
+├─ supabase/functions/passkey-api/
+│  ├─ index.ts               # 인증·세션·비공개 자료 API
+│  └─ deno.json
+├─ docs/assets/readme/       # 실제 화면 캡처
+├─ docs-assignment8.md
+├─ .env.example
+├─ package.json
+├─ package-lock.json
+├─ tailwind.config.js
+└─ vite.config.js
+~~~
 
 ## 환경 변수
 
