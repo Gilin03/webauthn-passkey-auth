@@ -1,4 +1,4 @@
-# PassKey 포트폴리오
+# WebAuthn 패스키 기반 비밀번호 없는 인증
 
 > React와 Vite로 만든 개인 포트폴리오에 패스키(WebAuthn) 기반 비공개 영역을 결합한 프로젝트입니다.
 
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Gilin03/passkey">GitHub Repository</a>
+  <a href="https://github.com/Gilin03/webauthn-passkey-auth">GitHub Repository</a>
 </p>
 
 <p align="center">
